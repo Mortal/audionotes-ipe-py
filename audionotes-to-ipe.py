@@ -1,7 +1,9 @@
 import io
+import os
 import tarfile
 import argparse
 import plistlib
+import textwrap
 import subprocess
 
 
@@ -39,7 +41,6 @@ def old_stroke_groups(drawing):
     # stroke_group = stroke_groups[0]
     p = subprocess.Popen(
         ('xclip', '-selection', 'c'),
-        #('cat',),
         stdin=subprocess.PIPE,
         universal_newlines=True)
     strokes = [stroke
@@ -62,7 +63,7 @@ def old_stroke_groups(drawing):
     p.wait()
 
 
-def brief_stroke_groups(drawing):
+def get_ipe_code(drawing, cx=None, cy=None):
     paths = []
     for g in drawing['briefStrokeGroups']:
         # g[0] has "anchorChar" and "anchorYLoc"
@@ -75,7 +76,8 @@ def brief_stroke_groups(drawing):
             xs = [float(x) for x in pts[::2]]
             ys = [-float(y) for y in pts[1::2]]
             color = (red, green, blue)
-            paths.append((xs, ys, color))
+            if len(xs) > 1:
+                paths.append((xs, ys, color))
 
     min_x = min(x for xs, ys, c in paths for x in xs)
     max_x = max(x for xs, ys, c in paths for x in xs)
@@ -85,16 +87,22 @@ def brief_stroke_groups(drawing):
     sx = max_x - min_x
     sy = max_y - min_y
 
+    if cx is None:
+        cx = sx / 2
+        cy = sy / 2
+
     for xs, ys, c in paths:
         for i, x in enumerate(xs):
-            xs[i] = x - min_x
+            xs[i] = x - min_x - sx / 2 + cx
         for i, y in enumerate(ys):
-            ys[i] = y - min_y
-
-    cx = sx / 2
-    cy = sy / 2
+            ys[i] = y - min_y - sy / 2 + cy
 
     str_paths = ''.join(str_path(xs, ys, c) for xs, ys, c in paths)
+    return str_paths, cx, cy
+
+
+def brief_stroke_groups(drawing):
+    str_paths, cx, cy = get_ipe_code(drawing)
     selection = '<ipeselection pos="%s %s">\n%s</ipeselection>\n' % (
         cx, cy, str_paths)
 
@@ -112,6 +120,9 @@ def brief_stroke_groups(drawing):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('filename')
+    parser.add_argument('--output-sound', '-s', required=False)
+    parser.add_argument('--output-page', '-p', required=False)
+    parser.add_argument('--output-rtf', '-r', required=False)
     args = parser.parse_args()
 
     with tarfile.open(args.filename, 'r:') as tf:
@@ -124,7 +135,51 @@ def main():
         print("Warning: Unknown app version %s" % o['app_version'])
 
     drawing = o['drawing']
-    brief_stroke_groups(drawing)
+    # brief_stroke_groups(drawing)
+
+    if args.output_sound:
+        base, ext = os.path.splitext(args.output_sound)
+        cmdline = ('ffmpeg',)
+        with tarfile.open(args.filename, 'r:') as tf:
+            for i, filename in enumerate(o['recordFileNames']):
+                tarinfo = tf.getmember(filename)
+                partname = base + '_%d.caf' % i
+                cmdline += ('-i', partname)
+                tf._extract_member(tarinfo, partname)
+        if ext == '.mp3':
+            cmdline += ('-acodec', 'libmp3lame', '-q:a', '5')
+        cmdline += (args.output_sound,)
+        subprocess.check_call(cmdline)
+
+    if args.output_page:
+        base, ext = os.path.splitext(args.output_page)
+        cx2, cy2 = 595, 842
+        str_paths, cx, cy = get_ipe_code(drawing, cx2 / 2, cy2 / 2)
+        with open(base + '.ipe', 'w') as fp:
+            fp.write(textwrap.dedent("""
+                <?xml version="1.0"?>
+                <!DOCTYPE ipe SYSTEM "ipe.dtd">
+                <ipe version="70005" creator="Ipe 7.1.4">
+                <info created="D:20151031152507" modified="D:20151031152507"/>
+                <ipestyle name="basic">
+                <pen name="fat" value="1.2"/>
+                <layout crop="no"/>
+                </ipestyle>
+                <page>
+                <layer name="alpha"/>
+                <view layers="alpha" active="alpha"/>
+            """.strip() + '\n'))
+            fp.write(str_paths)
+            fp.write('</page>\n</ipe>\n')
+
+        if ext != '.ipe':
+            subprocess.check_call(
+                ('ipetoipe', '-' + ext.lstrip('.'),
+                 base + '.ipe', base + ext))
+
+    if args.output_rtf:
+        with open(args.output_rtf, 'wb') as fp:
+            fp.write(o['RTFData'])
 
 
 if __name__ == "__main__":
